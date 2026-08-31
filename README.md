@@ -33,6 +33,8 @@
 git clone https://github.com/sasungeee/knu_schedule
 
 cd knu_schedule
+flutter create . --project-name knu_schedule --org ua.knu
+flutter pub get
 flutter build apk --release
 ```
 
