@@ -12,7 +12,7 @@
   </tr>
   <tr>
     <td align="center">
-      Програма була повністю написана за допомогою [Grok](https://grok.com)
+      Програма була повністю написана за допомогою <a href="https://grok.com">Grok</a>
   </tr>
 </table>
 
