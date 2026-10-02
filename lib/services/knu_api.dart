@@ -10,16 +10,23 @@ import '../models/models.dart';
 ///
 /// Сайт не дає публічного JSON API, тому працюємо через ті ж
 /// form-POST / AJAX, що й веб-інтерфейс.
+/// З осені 2025/2026 розклад вимагає авторизації.
 class KnuApi {
   static const baseUrl = 'https://asu.knu.edu.ua';
   static const userAgent =
-      'KNUSchedule/1.0 (Android; Flutter; +https://github.com/local/knu_schedule)';
+      'KNUSchedule/1.1 (Android; Flutter; +https://github.com/sasungeee/knu_schedule)';
 
   final http.Client _client;
   final Map<String, String> _cookies = {};
   String? _csrf;
+  bool _loggedIn = false;
+
+  String? _username;
+  String? _password;
 
   KnuApi({http.Client? client}) : _client = client ?? http.Client();
+
+  bool get isLoggedIn => _loggedIn;
 
   Map<String, String> get _headers => {
         'User-Agent': userAgent,
@@ -31,15 +38,41 @@ class KnuApi {
 
   void _storeCookies(http.Response res) {
     final raw = res.headers['set-cookie'];
-    if (raw == null) return;
-    // Може бути кілька Set-Cookie через кому — спрощено
-    for (final part in raw.split(',')) {
+    if (raw == null || raw.isEmpty) return;
+    final parts = _splitSetCookie(raw);
+    for (final part in parts) {
       final first = part.split(';').first.trim();
       final eq = first.indexOf('=');
       if (eq > 0) {
-        _cookies[first.substring(0, eq)] = first.substring(eq + 1);
+        final name = first.substring(0, eq).trim();
+        final value = first.substring(eq + 1).trim();
+        if (name.isNotEmpty) {
+          _cookies[name] = value;
+        }
       }
     }
+  }
+
+  List<String> _splitSetCookie(String raw) {
+    final result = <String>[];
+    final buffer = StringBuffer();
+    for (var i = 0; i < raw.length; i++) {
+      final c = raw[i];
+      if (c == ',') {
+        final rest = raw.substring(i + 1).trimLeft();
+        final looksLikeNew = RegExp(r'^[A-Za-z0-9_-]+=').hasMatch(rest);
+        if (looksLikeNew) {
+          final s = buffer.toString().trim();
+          if (s.isNotEmpty) result.add(s);
+          buffer.clear();
+          continue;
+        }
+      }
+      buffer.write(c);
+    }
+    final s = buffer.toString().trim();
+    if (s.isNotEmpty) result.add(s);
+    return result;
   }
 
   void _extractCsrf(String html) {
@@ -55,17 +88,113 @@ class KnuApi {
     }
   }
 
-  Future<void> _ensureSession() async {
-    if (_csrf != null && _cookies.isNotEmpty) return;
-    final res = await _client.get(
+  bool _isLoginPage(String html) {
+    final lower = html.toLowerCase();
+    return lower.contains('id="login-form"') ||
+        lower.contains('loginform-username') ||
+        (lower.contains('увійдіть') && lower.contains('login-form'));
+  }
+
+  void setCredentials(String username, String password) {
+    _username = username.trim();
+    _password = password;
+  }
+
+  void clearCredentials() {
+    _username = null;
+    _password = null;
+    _loggedIn = false;
+    _cookies.clear();
+    _csrf = null;
+  }
+
+  Future<bool> login(String username, String password) async {
+    username = username.trim();
+    if (username.isEmpty || password.isEmpty) {
+      throw KnuApiException('Введіть логін і пароль');
+    }
+
+    final getRes = await _client.get(
+      Uri.parse('$baseUrl/login'),
+      headers: {
+        'User-Agent': userAgent,
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8',
+      },
+    );
+    _storeCookies(getRes);
+    _extractCsrf(getRes.body);
+    if (_csrf == null) {
+      throw KnuApiException('Не вдалося отримати CSRF-токен зі сторінки входу');
+    }
+
+    final body = {
+      '_csrf-frontend': _csrf!,
+      'LoginForm[username]': username,
+      'LoginForm[password]': password,
+      'LoginForm[rememberMe]': '1',
+      'login-button': '',
+    };
+
+    final postRes = await _client.post(
+      Uri.parse('$baseUrl/login'),
+      headers: {
+        ..._headers,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Referer': '$baseUrl/login',
+        'Origin': baseUrl,
+      },
+      body: body,
+    );
+    _storeCookies(postRes);
+    _extractCsrf(postRes.body);
+
+    if (_isLoginPage(postRes.body)) {
+      final doc = html_parser.parse(postRes.body);
+      final err = doc.querySelector('.invalid-feedback, .alert-danger, .help-block');
+      final msg = err?.text.trim();
+      if (msg != null && msg.isNotEmpty) {
+        throw KnuApiException(msg);
+      }
+      throw KnuApiException('Невірний логін або пароль');
+    }
+
+    final check = await _client.get(
       Uri.parse('$baseUrl/time-table/group'),
       headers: _headers,
     );
-    _storeCookies(res);
-    _extractCsrf(res.body);
-    if (_csrf == null) {
-      throw KnuApiException('Не вдалося отримати CSRF-токен');
+    _storeCookies(check);
+    _extractCsrf(check.body);
+
+    if (_isLoginPage(check.body)) {
+      throw KnuApiException('Вхід виконано, але доступ до розкладу заборонено');
     }
+
+    _username = username;
+    _password = password;
+    _loggedIn = true;
+    return true;
+  }
+
+  Future<void> logout() async {
+    try {
+      await _client.get(
+        Uri.parse('$baseUrl/logout'),
+        headers: _headers,
+      );
+    } catch (_) {}
+    clearCredentials();
+  }
+
+  Future<void> _ensureSession() async {
+    if (_loggedIn && _csrf != null && _cookies.isNotEmpty) {
+      return;
+    }
+    if (_username != null && _password != null && _username!.isNotEmpty) {
+      await login(_username!, _password!);
+      return;
+    }
+    throw KnuAuthException('Потрібен вхід до asu.knu.edu.ua');
   }
 
   Future<http.Response> _postForm(Map<String, String> fields) async {
@@ -86,13 +215,41 @@ class KnuApi {
     );
     _storeCookies(res);
     _extractCsrf(res.body);
+
+    if (_isLoginPage(res.body)) {
+      _loggedIn = false;
+      if (_username != null && _password != null) {
+        await login(_username!, _password!);
+        final retryBody = {
+          '_csrf-frontend': _csrf!,
+          ...fields,
+        };
+        final retry = await _client.post(
+          Uri.parse('$baseUrl/time-table/group?type=0'),
+          headers: {
+            ..._headers,
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': '$baseUrl/time-table/group',
+          },
+          body: retryBody,
+        );
+        _storeCookies(retry);
+        _extractCsrf(retry.body);
+        if (_isLoginPage(retry.body) || retry.statusCode >= 400) {
+          throw KnuAuthException('Сесія закінчилась. Увійдіть знову.');
+        }
+        return retry;
+      }
+      throw KnuAuthException('Сесія закінчилась. Увійдіть знову.');
+    }
+
     if (res.statusCode >= 400) {
       throw KnuApiException('HTTP ${res.statusCode}');
     }
     return res;
   }
 
-  /// Список факультетів.
   Future<List<Faculty>> getFaculties() async {
     await _ensureSession();
     final res = await _client.get(
@@ -101,12 +258,21 @@ class KnuApi {
     );
     _storeCookies(res);
     _extractCsrf(res.body);
+
+    if (_isLoginPage(res.body)) {
+      _loggedIn = false;
+      if (_username != null && _password != null) {
+        await login(_username!, _password!);
+        return getFaculties();
+      }
+      throw KnuAuthException('Потрібен вхід до asu.knu.edu.ua');
+    }
+
     return _parseSelectOptions(res.body, 'timetableform-facultyid')
         .map((e) => Faculty(id: e.key, name: e.value))
         .toList();
   }
 
-  /// Курси для факультету.
   Future<List<int>> getCourses(int facultyId) async {
     final res = await _postForm({
       'TimeTableForm[facultyId]': '$facultyId',
@@ -118,7 +284,6 @@ class KnuApi {
         .toList();
   }
 
-  /// Групи факультету + курсу.
   Future<List<Group>> getGroups({
     required int facultyId,
     required String facultyName,
@@ -142,9 +307,7 @@ class KnuApi {
         .toList();
   }
 
-  /// Розклад групи (табличний вигляд type=0).
   Future<ScheduleResult> getSchedule(Group group) async {
-    // Повний submit (не лише AJAX-оновлення форми)
     await _ensureSession();
     final body = {
       '_csrf-frontend': _csrf!,
@@ -163,11 +326,20 @@ class KnuApi {
     );
     _storeCookies(res);
     _extractCsrf(res.body);
+
+    if (_isLoginPage(res.body)) {
+      _loggedIn = false;
+      if (_username != null && _password != null) {
+        await login(_username!, _password!);
+        return getSchedule(group);
+      }
+      throw KnuAuthException('Потрібен вхід до asu.knu.edu.ua');
+    }
+
     if (res.statusCode >= 400) {
       throw KnuApiException('Не вдалося завантажити розклад (${res.statusCode})');
     }
     final days = _parseScheduleTable(res.body);
-    // Повторне сортування на рівні API (на випадок дивного HTML)
     days.sort((a, b) {
       final da = _parseDdMmYyyy(a.date);
       final db = _parseDdMmYyyy(b.date);
@@ -181,8 +353,8 @@ class KnuApi {
     );
   }
 
-  /// Текст оголошення до пари.
   Future<String> getAds({required int r1, required String r2}) async {
+    await _ensureSession();
     final uri = Uri.parse('$baseUrl/time-table/show-ads').replace(
       queryParameters: {'r1': '$r1', 'r2': r2},
     );
@@ -201,8 +373,6 @@ class KnuApi {
     final html = data['html'] as String? ?? '';
     return _stripHtml(html);
   }
-
-  // --- parsers ---
 
   List<MapEntry<int, String>> _parseSelectOptions(String html, String selectId) {
     final doc = html_parser.parse(html);
@@ -229,19 +399,6 @@ class KnuApi {
     final rows = table.querySelectorAll('tr');
     if (rows.isEmpty) return [];
 
-    // Перший рядок: weekday + дати
-    final headerCells = rows.first.children;
-    // [0] = "Пн"/порожньо, далі дати
-    final dates = <String>[];
-    final weekdays = <String>[];
-    // У таблиці МКР: перша th — день тижня для рядка дат? Структура:
-    // <th class="headday">Пн</th><th class="headdate">31.08.2026</th>...
-    // Насправді для кожного дня тижня окремий блок рядків.
-    // Парсимо простіше: збираємо всі headdate і відповідні пари.
-
-    // Альтернативний підхід: пройти всі рядки з headcol (номер пари)
-    // і клітинки lesson-*
-
     final byDate = <String, List<Lesson>>{};
     final dateOrder = <String>[];
     String currentWeekday = '';
@@ -257,7 +414,6 @@ class KnuApi {
             byDate[d] = [];
             dateOrder.add(d);
           }
-          // зберігаємо weekday у окремій мапі через замикання нижче
           _weekdayMap[d] = currentWeekday;
         }
         continue;
@@ -273,10 +429,6 @@ class KnuApi {
       final timeEnd = headcol.querySelector('span.end')?.text.trim() ?? '';
 
       final cells = row.querySelectorAll('td');
-      // cells відповідають датам поточного блоку headdate
-      // Знаходимо дати з попереднього header-рядка цього блоку —
-      // для простоти: беремо dateOrder з останнього заголовка.
-      // Надійніше: у кожній клітинці data-content є дата.
 
       for (final td in cells) {
         final lessonDiv = td.querySelector('[class*="lesson-"]');
@@ -286,7 +438,6 @@ class KnuApi {
         final content = pop?.attributes['data-content'] ?? '';
         final title = pop?.attributes['title'] ?? '';
 
-        // title: "14.09.2026 1 пара"
         final dateMatch = RegExp(r'(\d{2}\.\d{2}\.\d{4})').firstMatch(title);
         final date = dateMatch?.group(1) ?? '';
         if (date.isEmpty) continue;
@@ -317,8 +468,6 @@ class KnuApi {
       }
     }
 
-    // Сайт групує колонки за днем тижня (усі Пн, потім усі Вт...).
-    // Для UI сортуємо хронологічно за датою.
     final result = <DaySchedule>[];
     final seen = <String>{};
     for (final d in dateOrder) {
@@ -356,8 +505,8 @@ class KnuApi {
   final Map<String, String> _weekdayMap = {};
 
   Lesson _parseLessonContent({
-    required String content,
     required Element shortHtml,
+    required String content,
     required int pairNumber,
     required String timeStart,
     required String timeEnd,
@@ -365,7 +514,6 @@ class KnuApi {
     int? adsR1,
     String? adsDate,
   }) {
-    // content: "Основи інженерії...[Лк]<br>ауд. 1-232_[9]<br>ІПЗ-26<br>Стрюк ...<br>Додано: ..."
     final parts = content
         .replaceAllMapped(RegExp(r'<br\s*/?>', caseSensitive: false), (_) => '\n')
         .replaceAll(RegExp(r'<[^>]+>'), '')
@@ -390,14 +538,12 @@ class KnuApi {
       } else if (p.startsWith('Додано')) {
         continue;
       } else if (!p.contains('-26') && !p.contains('-25') && teacherFull.isEmpty) {
-        // груба евристика: не назва групи
         if (!RegExp(r'^[А-ЯІЇЄA-Z]{2,}-').hasMatch(p)) {
           teacherFull = p;
         }
       }
     }
 
-    // short text from cell
     final shortText = shortHtml.text
         .replaceAll('Оголошення', '')
         .replaceAll(RegExp(r'\s+'), ' ')
@@ -437,7 +583,6 @@ class KnuApi {
 
   String _stripHtml(String html) {
     final doc = html_parser.parse(html);
-    // Зберігаємо посилання у вигляді "текст (url)"
     for (final a in doc.querySelectorAll('a[href]')) {
       final href = a.attributes['href'] ?? '';
       final t = a.text.trim();
@@ -457,4 +602,8 @@ class KnuApiException implements Exception {
   KnuApiException(this.message);
   @override
   String toString() => message;
+}
+
+class KnuAuthException extends KnuApiException {
+  KnuAuthException(super.message);
 }

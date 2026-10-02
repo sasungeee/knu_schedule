@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/models.dart';
 import '../services/knu_api.dart';
 import '../services/storage.dart';
+import 'login_screen.dart';
 import 'picker_screen.dart';
 import 'schedule_screen.dart';
 
@@ -19,17 +20,56 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Group> _pinned = [];
   int? _primaryId;
   bool _loading = true;
+  bool _authenticated = false;
+  bool _checkingAuth = true;
 
   @override
   void initState() {
     super.initState();
-    _reload();
+    _bootstrap();
   }
 
   @override
   void dispose() {
     _api.dispose();
     super.dispose();
+  }
+
+  Future<void> _bootstrap() async {
+    setState(() {
+      _checkingAuth = true;
+      _loading = true;
+    });
+
+    final creds = await _storage.loadCredentials();
+    if (creds != null) {
+      try {
+        _api.setCredentials(creds.username, creds.password);
+        await _api.login(creds.username, creds.password);
+        if (!mounted) return;
+        setState(() {
+          _authenticated = true;
+          _checkingAuth = false;
+        });
+        await _reload();
+        return;
+      } catch (_) {
+        if (!mounted) return;
+        setState(() {
+          _authenticated = false;
+          _checkingAuth = false;
+          _loading = false;
+        });
+        return;
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _authenticated = false;
+      _checkingAuth = false;
+      _loading = false;
+    });
   }
 
   Future<void> _reload() async {
@@ -43,22 +83,73 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  Future<void> _openPicker() async {
-    final added = await Navigator.of(context).push<Group>(
-      MaterialPageRoute(builder: (_) => PickerScreen(api: _api)),
+  void _onLoginSuccess() {
+    setState(() {
+      _authenticated = true;
+      _loading = true;
+    });
+    _reload();
+  }
+
+  Future<void> _logout() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Вийти?'),
+        content: const Text(
+          'Сесію буде завершено. Збережені групи залишаться, '
+          'але для перегляду розкладу потрібен повторний вхід.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Скасувати'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Вийти'),
+          ),
+        ],
+      ),
     );
-    if (added != null) {
-      await _storage.pin(added);
-      await _reload();
+    if (ok != true) return;
+    await _api.logout();
+    await _storage.clearCredentials();
+    if (!mounted) return;
+    setState(() {
+      _authenticated = false;
+    });
+  }
+
+  Future<void> _openPicker() async {
+    try {
+      final added = await Navigator.of(context).push<Group>(
+        MaterialPageRoute(builder: (_) => PickerScreen(api: _api)),
+      );
+      if (added != null) {
+        await _storage.pin(added);
+        await _reload();
+      }
+    } on KnuAuthException {
+      if (!mounted) return;
+      setState(() => _authenticated = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Сесія закінчилась. Увійдіть знову.')),
+      );
     }
   }
 
   Future<void> _openSchedule(Group group) async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => ScheduleScreen(group: group, api: _api),
-      ),
-    );
+    try {
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ScheduleScreen(group: group, api: _api),
+        ),
+      );
+    } on KnuAuthException {
+      if (!mounted) return;
+      setState(() => _authenticated = false);
+    }
   }
 
   Future<void> _setPrimary(Group g) async {
@@ -73,8 +164,14 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('Відкріпити?'),
         content: Text('Група ${g.name} буде прибрана з обраних.'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Скасувати')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Відкріпити')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Скасувати'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Відкріпити'),
+          ),
         ],
       ),
     );
@@ -86,6 +183,20 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (_checkingAuth) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (!_authenticated) {
+      return LoginScreen(
+        api: _api,
+        storage: _storage,
+        onSuccess: _onLoginSuccess,
+      );
+    }
+
     final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(
@@ -95,6 +206,17 @@ class _HomeScreenState extends State<HomeScreen> {
             tooltip: 'Додати групу',
             onPressed: _openPicker,
             icon: const Icon(Icons.add),
+          ),
+          PopupMenuButton<String>(
+            onSelected: (v) {
+              if (v == 'logout') _logout();
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: 'logout',
+                child: Text('Вийти з акаунту'),
+              ),
+            ],
           ),
         ],
       ),
