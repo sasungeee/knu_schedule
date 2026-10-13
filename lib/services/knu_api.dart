@@ -443,6 +443,9 @@ class KnuApi {
       }
     }
 
+    // Глобальний прохід: кнопки анонсів, що могли лишитись поза карткою.
+    _attachOrphanAnnouncements(doc, byDate);
+
     final result = <DaySchedule>[];
     for (final entry in byDate.entries) {
       final lessons = List<Lesson>.from(entry.value)
@@ -454,6 +457,118 @@ class KnuApi {
       ));
     }
     return _sortDays(result);
+  }
+
+  /// Якщо кнопка анонсу стоїть поруч з парою — прив'язуємо текст до Lesson.
+  void _attachOrphanAnnouncements(
+    Document doc,
+    Map<String, List<Lesson>> byDate,
+  ) {
+    final buttons = doc.querySelectorAll(
+      '[data-announcement], [data-ads], [data-announce], '
+      '[data-bs-target="#announcementTextModal"], '
+      '[data-bs-target*="announcement"]',
+    );
+    for (final btn in buttons) {
+      var text = (btn.attributes['data-announcement'] ??
+              btn.attributes['data-ads'] ??
+              btn.attributes['data-announce'] ??
+              '')
+          .trim();
+      if (text.isEmpty) {
+        Element? p = btn.parent;
+        for (var i = 0; i < 3 && p != null; i++) {
+          text = (p.attributes['data-announcement'] ??
+                  p.attributes['data-ads'] ??
+                  '')
+              .trim();
+          if (text.isNotEmpty) break;
+          p = p.parent;
+        }
+      }
+      if (text.isEmpty) continue;
+
+      String date = '';
+      int pair = 0;
+
+      void readAttrs(Element? e) {
+        if (e == null) return;
+        final d = e.attributes['data-date'];
+        if (d != null && d.trim().isNotEmpty) date = d.trim();
+        final pr =
+            e.attributes['data-pair-number'] ?? e.attributes['data-pair'];
+        if (pr != null) pair = int.tryParse(pr) ?? pair;
+      }
+
+      Element? scope = btn;
+      for (var i = 0; i < 10 && scope != null; i++) {
+        readAttrs(scope);
+        for (final child in scope.children) {
+          readAttrs(child);
+          for (final grand in child.children) {
+            readAttrs(grand);
+          }
+        }
+        if (date.isNotEmpty) break;
+        scope = scope.parent;
+      }
+
+      if (date.isEmpty) {
+        final blob =
+            '${btn.attributes['title'] ?? ''} ${btn.parent?.text ?? ''}';
+        final m = RegExp(r'(\d{1,2}\.\d{1,2}\.\d{4})').firstMatch(blob) ??
+            RegExp(
+              r'(\d{1,2}\s+[а-яіїєґА-ЯІЇЄҐ]+(?:\s+\d{4})?)',
+              unicode: true,
+            ).firstMatch(blob);
+        if (m != null) date = m.group(1)!;
+      }
+
+      void applyTo(List<Lesson> list) {
+        for (var i = 0; i < list.length; i++) {
+          final l = list[i];
+          if (pair > 0 && l.pairNumber != pair) continue;
+          if (l.hasAds && (l.adsDate?.trim().isNotEmpty ?? false)) continue;
+          list[i] = Lesson(
+            pairNumber: l.pairNumber,
+            timeStart: l.timeStart,
+            timeEnd: l.timeEnd,
+            date: l.date,
+            subjectShort: l.subjectShort,
+            subjectFull: l.subjectFull,
+            lessonType: l.lessonType,
+            classroom: l.classroom,
+            teacher: l.teacher,
+            teacherFull: l.teacherFull,
+            adsR1: 1,
+            adsDate: text,
+          );
+          break;
+        }
+      }
+
+      if (date.isEmpty) {
+        if (byDate.length == 1) {
+          applyTo(byDate.values.first);
+        } else {
+          // Вішаємо на всі дні з цією парою (краще, ніж втратити анонс).
+          for (final list in byDate.values) {
+            applyTo(list);
+          }
+        }
+        continue;
+      }
+
+      final norm = _normalizeDate(date);
+      final list = byDate[norm] ?? byDate[date];
+      if (list != null) {
+        applyTo(list);
+      } else {
+        for (final entry in byDate.values) {
+          applyTo(entry);
+        }
+      }
+    }
   }
 
   /// Завжди сортуємо дні за реальною датою (не рядком).
@@ -622,47 +737,31 @@ class KnuApi {
         ? shortText.split(RegExp(r'\[')).first.trim()
         : discipline;
 
-    // Оголошення: data-announcement, data-ads, або кнопка з megaphone.
-    String adsRaw = attr('data-announcement');
-    if (adsRaw.isEmpty) adsRaw = attr('data-ads');
-    if (adsRaw.isEmpty) {
-      final adsBtn = el.querySelector(
-        '[data-announcement], [data-ads], .btn-show-ads, '
-        '[data-bs-target="#announcementTextModal"], .bi-megaphone, '
-        'a[href*="show-ads"]',
+    // Оголошення / анонс — шукаємо агресивно в піддереві картки.
+    final adsInfo = _extractAds(el);
+    String adsRaw = adsInfo.text;
+    final adsR1 = adsInfo.r1;
+    final adsR2 = adsInfo.r2;
+
+    if (adsR1 != null && adsRaw.isEmpty) {
+      // Старий API show-ads за кодами.
+      return Lesson(
+        pairNumber: pairNumber,
+        timeStart: timeStart,
+        timeEnd: timeEnd,
+        date: date,
+        subjectShort: subjectShort.isEmpty ? discipline : subjectShort,
+        subjectFull: subjectFull.isEmpty ? subjectShort : subjectFull,
+        lessonType: lessonType,
+        classroom: classroom,
+        teacher: teacher,
+        teacherFull: teacher,
+        adsR1: adsR1,
+        adsDate: adsR2,
       );
-      if (adsBtn != null) {
-        adsRaw = adsBtn.attributes['data-announcement'] ??
-            adsBtn.attributes['data-ads'] ??
-            adsBtn.attributes['data-content'] ??
-            '';
-        // Старі коди r1/r2
-        final r1 = int.tryParse(adsBtn.attributes['data-r1'] ?? '');
-        final r2 = adsBtn.attributes['data-r2'];
-        if (adsRaw.isEmpty && r1 != null) {
-          return Lesson(
-            pairNumber: pairNumber,
-            timeStart: timeStart,
-            timeEnd: timeEnd,
-            date: date,
-            subjectShort: subjectShort.isEmpty ? discipline : subjectShort,
-            subjectFull: subjectFull.isEmpty ? subjectShort : subjectFull,
-            lessonType: lessonType,
-            classroom: classroom,
-            teacher: teacher,
-            teacherFull: teacher,
-            adsR1: r1,
-            adsDate: r2,
-          );
-        }
-      }
     }
-    // Якщо є іконка megaphone без тексту — все одно показуємо кнопку.
-    final hasMegaphone = el.querySelector(
-          '.bi-megaphone, .bi-megaphone-fill, .fa-bullhorn, .btn-show-ads',
-        ) !=
-        null;
-    final hasAds = adsRaw.trim().isNotEmpty || hasMegaphone;
+
+    final hasAds = adsRaw.trim().isNotEmpty || adsInfo.flagOnly;
 
     return Lesson(
       pairNumber: pairNumber,
@@ -675,11 +774,96 @@ class KnuApi {
       classroom: classroom,
       teacher: teacher,
       teacherFull: teacher,
-      adsR1: hasAds ? (adsRaw.trim().isNotEmpty ? 1 : 1) : null,
+      adsR1: hasAds ? 1 : null,
       adsDate: adsRaw.trim().isNotEmpty
           ? adsRaw
-          : (hasMegaphone ? ' ' : null), // пробіл = є кнопка, текст підвантажимо
+          : (adsInfo.flagOnly ? ' ' : null),
     );
+  }
+
+  /// Результат пошуку оголошення в HTML-картці.
+  ({String text, int? r1, String? r2, bool flagOnly}) _extractAds(Element el) {
+    String text = '';
+    int? r1;
+    String? r2;
+    var flagOnly = false;
+
+    // 1) Прямі атрибути на елементі / батьках.
+    for (final name in ['data-announcement', 'data-ads', 'data-announce']) {
+      final v = el.attributes[name];
+      if (v != null && v.trim().isNotEmpty) {
+        text = v.trim();
+        break;
+      }
+    }
+
+    // 2) Будь-який нащадок з data-announcement / модалкою анонсу.
+    final candidates = el.querySelectorAll(
+      '[data-announcement], [data-ads], [data-announce], '
+      '[data-bs-target="#announcementTextModal"], '
+      '[data-bs-target="#announcementTextModal"] *, '
+      '.btn-show-ads, a[href*="show-ads"], '
+      'button[data-announcement], a[data-announcement], '
+      '.bi-megaphone, .bi-megaphone-fill, .fa-bullhorn, '
+      '.schedule-lesson-buttons-group-table button, '
+      '.fc-lesson-buttons button, .fc-lesson-buttons a',
+    );
+
+    for (final btn in candidates) {
+      // Піднятись до елемента з атрибутом, якщо клікнули на іконку всередині.
+      Element? node = btn;
+      for (var i = 0; i < 4 && node != null; i++) {
+        final a = node.attributes['data-announcement'] ??
+            node.attributes['data-ads'] ??
+            node.attributes['data-announce'];
+        if (a != null && a.trim().isNotEmpty) {
+          if (text.isEmpty) text = a.trim();
+          break;
+        }
+        final rr1 = int.tryParse(node.attributes['data-r1'] ?? '');
+        if (rr1 != null) {
+          r1 ??= rr1;
+          r2 ??= node.attributes['data-r2'];
+        }
+        // data-bs-target на кнопці анонсу без тексту — все одно кнопка.
+        final target = node.attributes['data-bs-target'] ?? '';
+        if (target.contains('announcement')) flagOnly = true;
+        node = node.parent;
+      }
+
+      final cls = btn.className.toLowerCase();
+      if (cls.contains('megaphone') ||
+          cls.contains('bullhorn') ||
+          cls.contains('btn-show-ads')) {
+        flagOnly = true;
+      }
+      final label = btn.text.trim().toLowerCase();
+      if (label.contains('оголошен') ||
+          label.contains('анонс') ||
+          label.contains('announcement')) {
+        flagOnly = true;
+      }
+    }
+
+    // 3) title / aria-label з текстом оголошення.
+    if (text.isEmpty) {
+      for (final n in el.querySelectorAll('[title], [aria-label]')) {
+        final t = (n.attributes['title'] ?? n.attributes['aria-label'] ?? '')
+            .trim();
+        if (t.length > 15 &&
+            (t.toLowerCase().contains('http') ||
+                t.contains(' ') && t.length > 30)) {
+          // Ймовірно текст анонсу в title.
+          if (n.attributes.containsKey('data-announcement') ||
+              (n.attributes['data-bs-target'] ?? '').contains('announcement')) {
+            text = t;
+            break;
+          }
+        }
+      }
+    }
+
+    return (text: text, r1: r1, r2: r2, flagOnly: flagOnly || text.isNotEmpty);
   }
 
   Lesson? _lessonFromTextBlock(Element el) {

@@ -1,6 +1,12 @@
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/models.dart';
@@ -159,7 +165,7 @@ class _ScheduleScreenState extends State<ScheduleScreen>
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'Оголошення',
+                'Анонс',
                 style: Theme.of(ctx).textTheme.titleLarge,
               ),
               Text(
@@ -348,58 +354,173 @@ class _ScheduleScreenState extends State<ScheduleScreen>
   String _monthLabel(DateTime m) =>
       '${_ukMonths[m.month]} ${m.year}';
 
-  /// Текст розкладу за вибраний місяць (для копіювання / «завантаження»).
-  String _formatMonthText(int year, int month) {
-    final g = widget.group;
-    final buf = StringBuffer();
-    buf.writeln('Розклад: ${g.name}');
-    buf.writeln('${g.course} курс · ${g.facultyName}');
-    buf.writeln(_monthLabel(DateTime(year, month)));
-    buf.writeln('─' * 40);
-
+  List<DaySchedule> _daysForMonth(int year, int month) {
     final days = _schedule?.days ?? const <DaySchedule>[];
-    final filtered = days.where((d) {
+    return days.where((d) {
       final dt = _parseDate(d.date);
       return dt != null && dt.year == year && dt.month == month;
     }).toList();
+  }
 
-    if (filtered.isEmpty) {
-      buf.writeln('Немає занять у цьому місяці.');
-      return buf.toString();
-    }
+  Future<Uint8List> _buildMonthPdf(int year, int month) async {
+    final g = widget.group;
+    final filtered = _daysForMonth(year, month);
+    final fontData =
+        await rootBundle.load('assets/fonts/NotoSans-Regular.ttf');
+    final fontBoldData =
+        await rootBundle.load('assets/fonts/NotoSans-Bold.ttf');
+    final font = pw.Font.ttf(fontData);
+    final fontBold = pw.Font.ttf(fontBoldData);
 
-    for (final d in filtered) {
-      buf.writeln();
-      buf.writeln('${d.weekday} ${d.date}');
-      if (d.lessons.isEmpty) {
-        buf.writeln('  (пар немає)');
-        continue;
-      }
-      for (final l in d.lessons) {
-        final time = [
-          if (l.timeStart.isNotEmpty) l.timeStart,
-          if (l.timeEnd.isNotEmpty) l.timeEnd,
-        ].join('–');
-        final pair = l.pairNumber > 0 ? '${l.pairNumber} пара' : '';
-        final head = [pair, if (time.isNotEmpty) time].join(' · ');
-        buf.writeln('  ${head.isEmpty ? '•' : head}');
-        final subj = l.subjectFull.isNotEmpty ? l.subjectFull : l.subjectShort;
-        final type = l.lessonType.isNotEmpty ? ' [${l.lessonType}]' : '';
-        buf.writeln('    $subj$type');
-        if (l.classroom.isNotEmpty) buf.writeln('    ауд. ${l.classroom}');
-        if (l.teacher.isNotEmpty) {
-          buf.writeln(
-            '    ${l.teacherFull.isNotEmpty ? l.teacherFull : l.teacher}',
-          );
-        }
-      }
-    }
-    buf.writeln();
-    buf.writeln('─' * 40);
-    buf.writeln(
-      'Оновлено: ${DateFormat('dd.MM.yyyy HH:mm').format(_schedule!.loadedAt)}',
+    final doc = pw.Document(
+      title: 'Розклад ${g.name} — ${_monthLabel(DateTime(year, month))}',
+      author: 'Розклад КНУ',
     );
-    return buf.toString();
+
+    final theme = pw.ThemeData.withFont(base: font, bold: fontBold);
+
+    doc.addPage(
+      pw.MultiPage(
+        theme: theme,
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.fromLTRB(36, 40, 36, 40),
+        header: (ctx) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text(
+              'Розклад занять',
+              style: pw.TextStyle(font: fontBold, fontSize: 16),
+            ),
+            pw.SizedBox(height: 2),
+            pw.Text(
+              '${g.name}  ·  ${g.course} курс  ·  ${g.facultyName}',
+              style: pw.TextStyle(font: font, fontSize: 10, color: PdfColors.grey700),
+            ),
+            pw.Text(
+              _monthLabel(DateTime(year, month)),
+              style: pw.TextStyle(font: fontBold, fontSize: 12),
+            ),
+            pw.SizedBox(height: 6),
+            pw.Divider(color: PdfColors.grey400),
+            pw.SizedBox(height: 8),
+          ],
+        ),
+        footer: (ctx) => pw.Row(
+          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+          children: [
+            pw.Text(
+              'Оновлено: ${DateFormat('dd.MM.yyyy HH:mm').format(_schedule!.loadedAt)}',
+              style: pw.TextStyle(font: font, fontSize: 8, color: PdfColors.grey600),
+            ),
+            pw.Text(
+              'Стор. ${ctx.pageNumber} / ${ctx.pagesCount}',
+              style: pw.TextStyle(font: font, fontSize: 8, color: PdfColors.grey600),
+            ),
+          ],
+        ),
+        build: (ctx) {
+          if (filtered.isEmpty) {
+            return [
+              pw.Text(
+                'Немає занять у цьому місяці.',
+                style: pw.TextStyle(font: font, fontSize: 11),
+              ),
+            ];
+          }
+
+          final widgets = <pw.Widget>[];
+          for (final d in filtered) {
+            widgets.add(
+              pw.Container(
+                margin: const pw.EdgeInsets.only(bottom: 10),
+                padding: const pw.EdgeInsets.all(8),
+                decoration: pw.BoxDecoration(
+                  border: pw.Border.all(color: PdfColors.grey300),
+                  borderRadius: pw.BorderRadius.circular(6),
+                ),
+                child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Text(
+                      '${d.weekday}  ${d.date}',
+                      style: pw.TextStyle(font: fontBold, fontSize: 11),
+                    ),
+                    pw.SizedBox(height: 4),
+                    if (d.lessons.isEmpty)
+                      pw.Text(
+                        'Пар немає',
+                        style: pw.TextStyle(
+                          font: font,
+                          fontSize: 10,
+                          color: PdfColors.grey600,
+                        ),
+                      )
+                    else
+                      ...d.lessons.map((l) {
+                        final time = [
+                          if (l.timeStart.isNotEmpty) l.timeStart,
+                          if (l.timeEnd.isNotEmpty) l.timeEnd,
+                        ].join('–');
+                        final pair =
+                            l.pairNumber > 0 ? '${l.pairNumber} пара' : '';
+                        final head = [
+                          if (pair.isNotEmpty) pair,
+                          if (time.isNotEmpty) time,
+                          if (l.lessonType.isNotEmpty) l.lessonType,
+                        ].join('  ·  ');
+                        final subj = l.subjectFull.isNotEmpty
+                            ? l.subjectFull
+                            : l.subjectShort;
+                        return pw.Padding(
+                          padding: const pw.EdgeInsets.only(top: 4, bottom: 2),
+                          child: pw.Column(
+                            crossAxisAlignment: pw.CrossAxisAlignment.start,
+                            children: [
+                              if (head.isNotEmpty)
+                                pw.Text(
+                                  head,
+                                  style: pw.TextStyle(
+                                    font: fontBold,
+                                    fontSize: 9,
+                                    color: PdfColors.blueGrey800,
+                                  ),
+                                ),
+                              pw.Text(
+                                subj,
+                                style: pw.TextStyle(font: font, fontSize: 10),
+                              ),
+                              if (l.classroom.isNotEmpty ||
+                                  l.teacher.isNotEmpty)
+                                pw.Text(
+                                  [
+                                    if (l.classroom.isNotEmpty)
+                                      'ауд. ${l.classroom}',
+                                    if (l.teacher.isNotEmpty)
+                                      (l.teacherFull.isNotEmpty
+                                          ? l.teacherFull
+                                          : l.teacher),
+                                  ].join('  ·  '),
+                                  style: pw.TextStyle(
+                                    font: font,
+                                    fontSize: 9,
+                                    color: PdfColors.grey700,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        );
+                      }),
+                  ],
+                ),
+              ),
+            );
+          }
+          return widgets;
+        },
+      ),
+    );
+
+    return doc.save();
   }
 
   Future<void> _downloadMonth() async {
@@ -411,7 +532,6 @@ class _ScheduleScreenState extends State<ScheduleScreen>
       return;
     }
 
-    // Унікальні місяці з розкладу.
     final months = <String, DateTime>{};
     for (final d in schedule.days) {
       final dt = _parseDate(d.date);
@@ -428,7 +548,7 @@ class _ScheduleScreenState extends State<ScheduleScreen>
 
     final sorted = months.values.toList()..sort();
     final now = DateTime.now();
-    DateTime initial = sorted.firstWhere(
+    final initial = sorted.firstWhere(
       (m) => m.year == now.year && m.month == now.month,
       orElse: () => sorted.firstWhere(
         (m) => !m.isBefore(DateTime(now.year, now.month)),
@@ -448,7 +568,7 @@ class _ScheduleScreenState extends State<ScheduleScreen>
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
                 child: Text(
-                  'Завантажити розклад на місяць',
+                  'Завантажити розклад (PDF)',
                   style: Theme.of(ctx).textTheme.titleMedium,
                 ),
               ),
@@ -458,16 +578,15 @@ class _ScheduleScreenState extends State<ScheduleScreen>
                   itemCount: sorted.length,
                   itemBuilder: (_, i) {
                     final m = sorted[i];
-                    final label = _monthLabel(m);
                     final selected =
                         m.year == initial.year && m.month == initial.month;
                     return ListTile(
                       leading: Icon(
                         selected
-                            ? Icons.calendar_month
-                            : Icons.calendar_month_outlined,
+                            ? Icons.picture_as_pdf
+                            : Icons.picture_as_pdf_outlined,
                       ),
-                      title: Text(label),
+                      title: Text(_monthLabel(m)),
                       trailing: selected
                           ? const Icon(Icons.check, color: Colors.green)
                           : null,
@@ -484,67 +603,77 @@ class _ScheduleScreenState extends State<ScheduleScreen>
     );
     if (chosen == null || !mounted) return;
 
-    final text = _formatMonthText(chosen.year, chosen.month);
-    await Clipboard.setData(ClipboardData(text: text));
-    if (!mounted) return;
-
-    await showModalBottomSheet(
+    // Прогрес
+    showDialog(
       context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (ctx) {
-        return DraggableScrollableSheet(
-          expand: false,
-          initialChildSize: 0.7,
-          minChildSize: 0.4,
-          maxChildSize: 0.95,
-          builder: (_, scrollCtrl) {
-            return Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    _monthLabel(chosen),
-                    style: Theme.of(ctx).textTheme.titleLarge,
-                  ),
-                  Text(
-                    'Скопійовано в буфер обміну',
-                    style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(ctx).colorScheme.primary,
-                        ),
-                  ),
-                  const SizedBox(height: 12),
-                  Expanded(
-                    child: SingleChildScrollView(
-                      controller: scrollCtrl,
-                      child: SelectableText(
-                        text,
-                        style: Theme.of(ctx).textTheme.bodyMedium?.copyWith(
-                              fontFamily: 'monospace',
-                              height: 1.35,
-                            ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  FilledButton.icon(
-                    onPressed: () {
-                      Clipboard.setData(ClipboardData(text: text));
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Скопійовано')),
-                      );
-                    },
-                    icon: const Icon(Icons.copy),
-                    label: const Text('Копіювати ще раз'),
-                  ),
-                ],
-              ),
-            );
-          },
-        );
-      },
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Формую PDF…'),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
+
+    try {
+      final bytes = await _buildMonthPdf(chosen.year, chosen.month);
+      if (!mounted) return;
+      Navigator.of(context).pop(); // progress
+
+      final g = widget.group;
+      final safeName = g.name.replaceAll(RegExp(r'[^\wа-яА-ЯіІїЇєЄґҐ\-]+'), '_');
+      final fileName =
+          'rozklad_${safeName}_${chosen.year}_${chosen.month.toString().padLeft(2, '0')}.pdf';
+
+      // На desktop (Linux/Windows/macOS) saveFile лише повертає шлях —
+      // bytes треба записати самим. На Android/iOS bytes пише плагін.
+      var path = await FilePicker.platform.saveFile(
+        dialogTitle: 'Зберегти розклад',
+        fileName: fileName,
+        type: FileType.custom,
+        allowedExtensions: const ['pdf'],
+        bytes: bytes,
+      );
+
+      if (!mounted) return;
+      if (path == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Збереження скасовано')),
+        );
+        return;
+      }
+
+      if (!path.toLowerCase().endsWith('.pdf')) {
+        path = '$path.pdf';
+      }
+
+      // Завжди дописуємо файл (на Linux/Windows bytes ігноруються).
+      final file = File(path);
+      await file.writeAsBytes(bytes, flush: true);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Збережено:\n$path')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      // Закрити прогрес, якщо ще відкритий.
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Помилка PDF: $e')),
+      );
+    }
   }
 
   @override
@@ -809,7 +938,7 @@ class _LessonCard extends StatelessWidget {
                         alignment: Alignment.centerLeft,
                         child: ActionChip(
                           avatar: const Icon(Icons.campaign_outlined, size: 18),
-                          label: const Text('Оголошення'),
+                          label: const Text('Анонс'),
                           onPressed: () => onAds(lesson),
                         ),
                       ),
