@@ -18,6 +18,9 @@
 
 ## Що вміє
 
+- **Авторизація** на asu.knu.edu.ua (логін / email + пароль)
+- Збереження облікових даних («Запам'ятати мене»)
+- Автоматичний повторний вхід при закінченні сесії
 - Можна закріпити кілька груп (факультет / курс / група) — без повторного вибору
 - Основна група + швидке перемикання
 - Розклад **по днях** і **списком**
@@ -44,11 +47,15 @@ APK: `build/app/outputs/flutter-apk/app-release.apk`.
 
 Сайт на системі **МКР (ПС-Розклад)**. Публічного JSON API немає, тому клієнт:
 
-1. `GET /time-table/group` — CSRF + cookies
-2. `POST /time-table/group?type=0` з полями `TimeTableForm[...]` — факультети → курси → групи → HTML-таблиця
-3. `GET /time-table/show-ads?r1=&r2=` + заголовок `X-Requested-With: XMLHttpRequest` — оголошення
+1. `GET /login` — CSRF + cookies
+2. `POST /login` з полями `LoginForm[username]`, `LoginForm[password]`, `LoginForm[rememberMe]`
+3. `GET /time-table/group` — CSRF + cookies (після входу)
+4. `POST /time-table/group?type=0` з полями `TimeTableForm[...]` — факультети → курси → групи → HTML-таблиця
+5. `GET /time-table/show-ads?r1=&r2=` + заголовок `X-Requested-With: XMLHttpRequest` — оголошення
 
 Парсинг HTML таблиці `#timeTable`.
+
+Якщо сесія закінчилась (сайт знову показує форму логіну) — клієнт автоматично повторює вхід зі збереженими обліковими даними.
 
 ## Структура
 
@@ -56,15 +63,25 @@ APK: `build/app/outputs/flutter-apk/app-release.apk`.
 lib/
   main.dart
   models/models.dart
-  services/knu_api.dart    # мережа + парсер
-  services/storage.dart    # SharedPreferences (закріплені групи)
+  services/knu_api.dart    # мережа + парсер + логін
+  services/storage.dart    # SharedPreferences (групи + облікові дані)
   screens/
     home_screen.dart
+    login_screen.dart      # екран входу
     picker_screen.dart
     schedule_screen.dart
 ```
+
+## Облікові дані
+
+Логін і пароль (якщо увімкнено «Запам'ятати мене») зберігаються локально в
+`SharedPreferences`. Це зручно, але не найвищий рівень захисту — для продакшену
+можна замінити на `flutter_secure_storage`.
+
+Реєстрація акаунта: https://asu.knu.edu.ua/registration
 
 ## Обмеження
 
 - Залежить від HTML-розмітки сайту МКР (при великих змінах парсер може потребувати оновлення)
 - Потрібен інтернет для першого завантаження; локальний офлайн-кеш розкладу можна додати пізніше
+- Розклад доступний лише після авторизації на asu.knu.edu.ua

@@ -76,78 +76,96 @@ class _ScheduleScreenState extends State<ScheduleScreen>
 
   Future<void> _showAds(Lesson lesson) async {
     if (lesson.adsR1 == null || lesson.adsDate == null) return;
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
-    try {
-      final text = await widget.api.getAds(
-        r1: lesson.adsR1!,
-        r2: lesson.adsDate!,
-      );
-      if (!mounted) return;
-      Navigator.of(context).pop(); // progress
-      await showModalBottomSheet(
+
+    // Нова розмітка МКР 3.x: оголошення вже в data-announcement
+    // (парсер кладе його в adsDate, adsR1 == 1 як маркер).
+    // Стара: adsR1/adsDate — коди для /time-table/show-ads.
+    final bool inline = lesson.adsR1 == 1 &&
+        (lesson.adsDate!.contains('<') || lesson.adsDate!.length > 24);
+
+    late final String text;
+    if (inline) {
+      text = lesson.adsDate!
+          .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n')
+          .replaceAll(RegExp(r'<[^>]+>'), '')
+          .replaceAll(RegExp(r'\n{3,}'), '\n\n')
+          .trim();
+    } else {
+      showDialog(
         context: context,
-        isScrollControlled: true,
-        showDragHandle: true,
-        builder: (ctx) {
-          return Padding(
-            padding: EdgeInsets.only(
-              left: 20,
-              right: 20,
-              top: 8,
-              bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Оголошення',
-                  style: Theme.of(ctx).textTheme.titleLarge,
-                ),
-                Text(
-                  '${lesson.subjectShort} · ${lesson.date}',
-                  style: Theme.of(ctx).textTheme.bodySmall,
-                ),
-                const SizedBox(height: 12),
-                SelectableText(
-                  text.isEmpty ? 'Немає тексту оголошення' : text,
-                  style: Theme.of(ctx).textTheme.bodyMedium,
-                ),
-                const SizedBox(height: 16),
-                // клікабельні URL
-                ..._extractUrls(text).map(
-                  (u) => Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: FilledButton.tonalIcon(
-                      onPressed: () => launchUrl(
-                        Uri.parse(u),
-                        mode: LaunchMode.externalApplication,
-                      ),
-                      icon: const Icon(Icons.open_in_new, size: 18),
-                      label: Text(
-                        u,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+        barrierDismissible: false,
+        builder: (_) => const Center(child: CircularProgressIndicator()),
+      );
+      try {
+        text = await widget.api.getAds(
+          r1: lesson.adsR1!,
+          r2: lesson.adsDate!,
+        );
+        if (!mounted) return;
+        Navigator.of(context).pop();
+      } catch (e) {
+        if (!mounted) return;
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Помилка: $e')),
+        );
+        return;
+      }
+    }
+
+    if (!mounted) return;
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (ctx) {
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 20,
+            right: 20,
+            top: 8,
+            bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Оголошення',
+                style: Theme.of(ctx).textTheme.titleLarge,
+              ),
+              Text(
+                '${lesson.subjectShort} · ${lesson.date}',
+                style: Theme.of(ctx).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 12),
+              SelectableText(
+                text.isEmpty ? 'Немає тексту оголошення' : text,
+                style: Theme.of(ctx).textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 16),
+              ..._extractUrls(text).map(
+                (u) => Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: FilledButton.tonalIcon(
+                    onPressed: () => launchUrl(
+                      Uri.parse(u),
+                      mode: LaunchMode.externalApplication,
+                    ),
+                    icon: const Icon(Icons.open_in_new, size: 18),
+                    label: Text(
+                      u,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
                 ),
-              ],
-            ),
-          );
-        },
-      );
-    } catch (e) {
-      if (!mounted) return;
-      Navigator.of(context).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Помилка: $e')),
-      );
-    }
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   List<String> _extractUrls(String text) {

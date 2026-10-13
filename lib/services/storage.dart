@@ -7,6 +7,9 @@ import '../models/models.dart';
 class AppStorage {
   static const _pinnedKey = 'pinned_groups';
   static const _primaryKey = 'primary_group_id';
+  static const _usernameKey = 'auth_username';
+  static const _passwordKey = 'auth_password';
+  static const _rememberKey = 'auth_remember';
 
   Future<List<Group>> loadPinned() async {
     final prefs = await SharedPreferences.getInstance();
@@ -59,5 +62,44 @@ class AppStorage {
 
   Future<void> setPrimary(int groupId) async {
     await savePrimaryId(groupId);
+  }
+
+  // --- auth ---
+
+  Future<({String username, String password})?> loadCredentials() async {
+    final prefs = await SharedPreferences.getInstance();
+    final remember = prefs.getBool(_rememberKey) ?? false;
+    if (!remember) return null;
+    final u = prefs.getString(_usernameKey);
+    final p = prefs.getString(_passwordKey);
+    if (u == null || p == null || u.isEmpty || p.isEmpty) return null;
+    return (username: u, password: p);
+  }
+
+  Future<void> saveCredentials({
+    required String username,
+    required String password,
+    required bool remember,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (remember) {
+      await prefs.setString(_usernameKey, username.trim());
+      await prefs.setString(_passwordKey, password);
+      await prefs.setBool(_rememberKey, true);
+    } else {
+      await clearCredentials();
+    }
+  }
+
+  Future<void> clearCredentials() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_usernameKey);
+    await prefs.remove(_passwordKey);
+    await prefs.setBool(_rememberKey, false);
+  }
+
+  Future<bool> hasSavedCredentials() async {
+    final c = await loadCredentials();
+    return c != null;
   }
 }
