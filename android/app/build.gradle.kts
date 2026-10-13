@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "ua.knu.knu_schedule"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

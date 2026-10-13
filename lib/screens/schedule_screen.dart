@@ -636,33 +636,32 @@ class _ScheduleScreenState extends State<ScheduleScreen>
 
       // На desktop (Linux/Windows/macOS) saveFile лише повертає шлях —
       // bytes треба записати самим. На Android/iOS bytes пише плагін.
-      var path = await FilePicker.platform.saveFile(
+      final Uri? uri = await FilePicker.saveFile(
         dialogTitle: 'Зберегти розклад',
-        fileName: fileName,
+        fileName: fileName.endsWith('.pdf')
+            ? fileName
+            : '$fileName.pdf',
         type: FileType.custom,
         allowedExtensions: const ['pdf'],
         bytes: bytes,
       );
 
       if (!mounted) return;
-      if (path == null) {
+
+      if (uri == null) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Збереження скасовано')),
         );
         return;
       }
 
-      if (!path.toLowerCase().endsWith('.pdf')) {
-        path = '$path.pdf';
-      }
-
-      // Завжди дописуємо файл (на Linux/Windows bytes ігноруються).
-      final file = File(path);
-      await file.writeAsBytes(bytes, flush: true);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Збережено:\n$uri')),
+      );
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Збережено:\n$path')),
+        SnackBar(content: Text('Збережено:\n$uri')),
       );
     } catch (e) {
       if (!mounted) return;
