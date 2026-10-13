@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -44,13 +45,15 @@ class _ScheduleScreenState extends State<ScheduleScreen>
     try {
       final s = await widget.api.getSchedule(widget.group);
       if (!mounted) return;
-      // Сайт віддає дні блоками Пн…Пн, Вт…Вт — сортуємо за датою
+      // Сортуємо строго за DateTime (не рядком — інакше 10.11 перед 13.10).
       final sortedDays = List<DaySchedule>.from(s.days)
         ..sort((a, b) {
           final da = _parseDate(a.date);
           final db = _parseDate(b.date);
-          if (da == null || db == null) return a.date.compareTo(b.date);
-          return da.compareTo(db);
+          if (da != null && db != null) return da.compareTo(db);
+          if (da != null) return -1;
+          if (db != null) return 1;
+          return a.date.compareTo(b.date);
         });
       final sorted = ScheduleResult(
         group: s.group,
@@ -59,7 +62,16 @@ class _ScheduleScreenState extends State<ScheduleScreen>
       );
       final today = DateFormat('dd.MM.yyyy').format(DateTime.now());
       var idx = sorted.days.indexWhere((d) => d.date == today);
-      if (idx < 0) idx = 0;
+      // Якщо сьогодні немає — перший день >= сьогодні, інакше 0.
+      if (idx < 0) {
+        final now = DateTime.now();
+        final todayOnly = DateTime(now.year, now.month, now.day);
+        idx = sorted.days.indexWhere((d) {
+          final dt = _parseDate(d.date);
+          return dt != null && !dt.isBefore(todayOnly);
+        });
+        if (idx < 0) idx = 0;
+      }
       setState(() {
         _schedule = sorted;
         _dayIndex = idx.clamp(0, (sorted.days.length - 1).clamp(0, 999));
@@ -75,17 +87,20 @@ class _ScheduleScreenState extends State<ScheduleScreen>
   }
 
   Future<void> _showAds(Lesson lesson) async {
-    if (lesson.adsR1 == null || lesson.adsDate == null) return;
+    if (!lesson.hasAds) return;
 
-    // Нова розмітка МКР 3.x: оголошення вже в data-announcement
-    // (парсер кладе його в adsDate, adsR1 == 1 як маркер).
-    // Стара: adsR1/adsDate — коди для /time-table/show-ads.
-    final bool inline = lesson.adsR1 == 1 &&
-        (lesson.adsDate!.contains('<') || lesson.adsDate!.length > 24);
+    // Нова розмітка: текст у adsDate (HTML/plain).
+    // Стара: adsR1 + adsDate = коди для /time-table/show-ads.
+    final adsPayload = lesson.adsDate ?? '';
+    final bool looksLikeOldCodes = lesson.adsR1 != null &&
+        lesson.adsR1 != 1 &&
+        adsPayload.length <= 24 &&
+        !adsPayload.contains('<') &&
+        !adsPayload.contains('http');
 
     late final String text;
-    if (inline) {
-      text = lesson.adsDate!
+    if (!looksLikeOldCodes) {
+      text = adsPayload
           .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n')
           .replaceAll(RegExp(r'<[^>]+>'), '')
           .replaceAll(RegExp(r'\n{3,}'), '\n\n')
@@ -99,7 +114,7 @@ class _ScheduleScreenState extends State<ScheduleScreen>
       try {
         text = await widget.api.getAds(
           r1: lesson.adsR1!,
-          r2: lesson.adsDate!,
+          r2: adsPayload,
         );
         if (!mounted) return;
         Navigator.of(context).pop();
@@ -114,6 +129,19 @@ class _ScheduleScreenState extends State<ScheduleScreen>
     }
 
     if (!mounted) return;
+    final urls = _extractUrls(text);
+    // Прибираємо URL з тексту, якщо показуємо окремі кнопки — без дублів.
+    var displayText = text;
+    if (urls.isNotEmpty) {
+      for (final u in urls) {
+        displayText = displayText.replaceAll(u, '').trim();
+      }
+      displayText = displayText
+          .replaceAll(RegExp(r'[ \t]+\n'), '\n')
+          .replaceAll(RegExp(r'\n{3,}'), '\n\n')
+          .trim();
+    }
+
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -139,28 +167,36 @@ class _ScheduleScreenState extends State<ScheduleScreen>
                 style: Theme.of(ctx).textTheme.bodySmall,
               ),
               const SizedBox(height: 12),
-              SelectableText(
-                text.isEmpty ? 'Немає тексту оголошення' : text,
-                style: Theme.of(ctx).textTheme.bodyMedium,
-              ),
-              const SizedBox(height: 16),
-              ..._extractUrls(text).map(
-                (u) => Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: FilledButton.tonalIcon(
-                    onPressed: () => launchUrl(
-                      Uri.parse(u),
-                      mode: LaunchMode.externalApplication,
-                    ),
-                    icon: const Icon(Icons.open_in_new, size: 18),
-                    label: Text(
-                      u,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+              if (displayText.isNotEmpty)
+                SelectableText(
+                  displayText,
+                  style: Theme.of(ctx).textTheme.bodyMedium,
+                )
+              else if (urls.isEmpty)
+                Text(
+                  'Немає тексту оголошення',
+                  style: Theme.of(ctx).textTheme.bodyMedium,
+                ),
+              if (urls.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                ...urls.map(
+                  (u) => Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: FilledButton.tonalIcon(
+                      onPressed: () => launchUrl(
+                        Uri.parse(u),
+                        mode: LaunchMode.externalApplication,
+                      ),
+                      icon: const Icon(Icons.open_in_new, size: 18),
+                      label: Text(
+                        u,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   ),
                 ),
-              ),
+              ],
             ],
           ),
         );
@@ -169,18 +205,345 @@ class _ScheduleScreenState extends State<ScheduleScreen>
   }
 
   List<String> _extractUrls(String text) {
-    final re = RegExp(r'https?://[^\s<>"]+', caseSensitive: false);
-    return re.allMatches(text).map((m) => m.group(0)!).toSet().toList();
+    final re = RegExp(r'https?://[^\s<>\)\]]+', caseSensitive: false);
+    // Нормалізуємо (прибираємо хвіст пунктуації) і унікалізуємо.
+    final seen = <String>{};
+    final out = <String>[];
+    for (final m in re.allMatches(text)) {
+      var u = m.group(0)!;
+      while (u.isNotEmpty && '.,;:!?'.contains(u[u.length - 1])) {
+        u = u.substring(0, u.length - 1);
+      }
+      if (u.isNotEmpty && seen.add(u)) out.add(u);
+    }
+    return out;
   }
 
-  DateTime? _parseDate(String ddmmyyyy) {
-    final cleaned = ddmmyyyy.replaceAll(RegExp(r'[^\d.]'), '');
-    final m = RegExp(r'^(\d{2})\.(\d{2})\.(\d{4})$').firstMatch(cleaned);
-    if (m == null) return null;
-    return DateTime(
-      int.parse(m.group(3)!),
-      int.parse(m.group(2)!),
-      int.parse(m.group(1)!),
+  DateTime? _parseDate(String raw) {
+    final s = raw.trim();
+    if (s.isEmpty) return null;
+
+    final dmy = RegExp(r'(\d{1,2})\.(\d{1,2})\.(\d{4})').firstMatch(s);
+    if (dmy != null) {
+      try {
+        return DateTime(
+          int.parse(dmy.group(3)!),
+          int.parse(dmy.group(2)!),
+          int.parse(dmy.group(1)!),
+        );
+      } catch (_) {}
+    }
+
+    final iso = RegExp(r'(\d{4})-(\d{2})-(\d{2})').firstMatch(s);
+    if (iso != null) {
+      try {
+        return DateTime(
+          int.parse(iso.group(1)!),
+          int.parse(iso.group(2)!),
+          int.parse(iso.group(3)!),
+        );
+      } catch (_) {}
+    }
+
+    // «13 жовтня», «10 листопада 2026», «2 листопада»
+    final uk = RegExp(
+      r'(\d{1,2})\s*([а-яіїєґА-ЯІЇЄҐ]+)\s*(\d{4})?',
+      unicode: true,
+    ).firstMatch(s);
+    if (uk != null) {
+      final day = int.tryParse(uk.group(1)!);
+      final monthWord = uk.group(2)!.toLowerCase();
+      final yearStr = uk.group(3);
+      int? month;
+      if (monthWord.startsWith('лист')) {
+        month = 11;
+      } else if (monthWord.startsWith('лип')) {
+        month = 7;
+      } else if (monthWord.startsWith('січ')) {
+        month = 1;
+      } else if (monthWord.startsWith('лют')) {
+        month = 2;
+      } else if (monthWord.startsWith('бер')) {
+        month = 3;
+      } else if (monthWord.startsWith('квіт')) {
+        month = 4;
+      } else if (monthWord.startsWith('трав')) {
+        month = 5;
+      } else if (monthWord.startsWith('черв')) {
+        month = 6;
+      } else if (monthWord.startsWith('серп')) {
+        month = 8;
+      } else if (monthWord.startsWith('вер')) {
+        month = 9;
+      } else if (monthWord.startsWith('жовт')) {
+        month = 10;
+      } else if (monthWord.startsWith('груд')) {
+        month = 12;
+      }
+      if (day != null && month != null) {
+        final year = yearStr != null ? int.parse(yearStr) : DateTime.now().year;
+        // Якщо дата без року і вийшла далеко в минулому відносно «сьогодні»
+        // у січні для «грудня» — вважаємо попередній рік.
+        var dt = DateTime(year, month, day);
+        if (yearStr == null) {
+          final now = DateTime.now();
+          if (dt.difference(now).inDays > 180) {
+            dt = DateTime(year - 1, month, day);
+          } else if (now.difference(dt).inDays > 180) {
+            dt = DateTime(year + 1, month, day);
+          }
+        }
+        return dt;
+      }
+    }
+
+    return DateTime.tryParse(s);
+  }
+
+  /// Короткий підпис чіпа: «13 жовт».
+  String _chipLabel(DaySchedule d) {
+    final dt = _parseDate(d.date);
+    if (dt != null) {
+      const short = [
+        '',
+        'січ',
+        'лют',
+        'бер',
+        'квіт',
+        'трав',
+        'черв',
+        'лип',
+        'серп',
+        'вер',
+        'жовт',
+        'лист',
+        'груд',
+      ];
+      final wd = d.weekday.isNotEmpty
+          ? d.weekday
+          : const ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'][dt.weekday - 1];
+      return '$wd ${dt.day} ${short[dt.month]}';
+    }
+    // fallback
+    final dayNum = d.date.length >= 5 ? d.date.substring(0, 5) : d.date;
+    return '${d.weekday} $dayNum'.trim();
+  }
+
+  static const _ukMonths = [
+    '',
+    'січень',
+    'лютий',
+    'березень',
+    'квітень',
+    'травень',
+    'червень',
+    'липень',
+    'серпень',
+    'вересень',
+    'жовтень',
+    'листопад',
+    'грудень',
+  ];
+
+  String _monthLabel(DateTime m) =>
+      '${_ukMonths[m.month]} ${m.year}';
+
+  /// Текст розкладу за вибраний місяць (для копіювання / «завантаження»).
+  String _formatMonthText(int year, int month) {
+    final g = widget.group;
+    final buf = StringBuffer();
+    buf.writeln('Розклад: ${g.name}');
+    buf.writeln('${g.course} курс · ${g.facultyName}');
+    buf.writeln(_monthLabel(DateTime(year, month)));
+    buf.writeln('─' * 40);
+
+    final days = _schedule?.days ?? const <DaySchedule>[];
+    final filtered = days.where((d) {
+      final dt = _parseDate(d.date);
+      return dt != null && dt.year == year && dt.month == month;
+    }).toList();
+
+    if (filtered.isEmpty) {
+      buf.writeln('Немає занять у цьому місяці.');
+      return buf.toString();
+    }
+
+    for (final d in filtered) {
+      buf.writeln();
+      buf.writeln('${d.weekday} ${d.date}');
+      if (d.lessons.isEmpty) {
+        buf.writeln('  (пар немає)');
+        continue;
+      }
+      for (final l in d.lessons) {
+        final time = [
+          if (l.timeStart.isNotEmpty) l.timeStart,
+          if (l.timeEnd.isNotEmpty) l.timeEnd,
+        ].join('–');
+        final pair = l.pairNumber > 0 ? '${l.pairNumber} пара' : '';
+        final head = [pair, if (time.isNotEmpty) time].join(' · ');
+        buf.writeln('  ${head.isEmpty ? '•' : head}');
+        final subj = l.subjectFull.isNotEmpty ? l.subjectFull : l.subjectShort;
+        final type = l.lessonType.isNotEmpty ? ' [${l.lessonType}]' : '';
+        buf.writeln('    $subj$type');
+        if (l.classroom.isNotEmpty) buf.writeln('    ауд. ${l.classroom}');
+        if (l.teacher.isNotEmpty) {
+          buf.writeln(
+            '    ${l.teacherFull.isNotEmpty ? l.teacherFull : l.teacher}',
+          );
+        }
+      }
+    }
+    buf.writeln();
+    buf.writeln('─' * 40);
+    buf.writeln(
+      'Оновлено: ${DateFormat('dd.MM.yyyy HH:mm').format(_schedule!.loadedAt)}',
+    );
+    return buf.toString();
+  }
+
+  Future<void> _downloadMonth() async {
+    final schedule = _schedule;
+    if (schedule == null || schedule.days.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Спочатку завантажте розклад')),
+      );
+      return;
+    }
+
+    // Унікальні місяці з розкладу.
+    final months = <String, DateTime>{};
+    for (final d in schedule.days) {
+      final dt = _parseDate(d.date);
+      if (dt == null) continue;
+      final key = '${dt.year}-${dt.month.toString().padLeft(2, '0')}';
+      months.putIfAbsent(key, () => DateTime(dt.year, dt.month));
+    }
+    if (months.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Немає дат у розкладі')),
+      );
+      return;
+    }
+
+    final sorted = months.values.toList()..sort();
+    final now = DateTime.now();
+    DateTime initial = sorted.firstWhere(
+      (m) => m.year == now.year && m.month == now.month,
+      orElse: () => sorted.firstWhere(
+        (m) => !m.isBefore(DateTime(now.year, now.month)),
+        orElse: () => sorted.last,
+      ),
+    );
+
+    final chosen = await showModalBottomSheet<DateTime>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+                child: Text(
+                  'Завантажити розклад на місяць',
+                  style: Theme.of(ctx).textTheme.titleMedium,
+                ),
+              ),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: sorted.length,
+                  itemBuilder: (_, i) {
+                    final m = sorted[i];
+                    final label = _monthLabel(m);
+                    final selected =
+                        m.year == initial.year && m.month == initial.month;
+                    return ListTile(
+                      leading: Icon(
+                        selected
+                            ? Icons.calendar_month
+                            : Icons.calendar_month_outlined,
+                      ),
+                      title: Text(label),
+                      trailing: selected
+                          ? const Icon(Icons.check, color: Colors.green)
+                          : null,
+                      onTap: () => Navigator.pop(ctx, m),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+    if (chosen == null || !mounted) return;
+
+    final text = _formatMonthText(chosen.year, chosen.month);
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (ctx) {
+        return DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.7,
+          minChildSize: 0.4,
+          maxChildSize: 0.95,
+          builder: (_, scrollCtrl) {
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    _monthLabel(chosen),
+                    style: Theme.of(ctx).textTheme.titleLarge,
+                  ),
+                  Text(
+                    'Скопійовано в буфер обміну',
+                    style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(ctx).colorScheme.primary,
+                        ),
+                  ),
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      controller: scrollCtrl,
+                      child: SelectableText(
+                        text,
+                        style: Theme.of(ctx).textTheme.bodyMedium?.copyWith(
+                              fontFamily: 'monospace',
+                              height: 1.35,
+                            ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: text));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Скопійовано')),
+                      );
+                    },
+                    icon: const Icon(Icons.copy),
+                    label: const Text('Копіювати ще раз'),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
     );
   }
 
@@ -203,6 +566,11 @@ class _ScheduleScreenState extends State<ScheduleScreen>
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Завантажити розклад на місяць',
+            onPressed: _loading || _schedule == null ? null : _downloadMonth,
+            icon: const Icon(Icons.calendar_month_outlined),
+          ),
           IconButton(
             tooltip: 'Оновити',
             onPressed: _loading ? null : _load,
@@ -260,12 +628,12 @@ class _ScheduleScreenState extends State<ScheduleScreen>
             itemBuilder: (context, i) {
               final d = days[i];
               final selected = i == _dayIndex;
-              final dayNum = d.date.length >= 5 ? d.date.substring(0, 5) : d.date;
+              final chipText = _chipLabel(d);
               return Padding(
                 padding: const EdgeInsets.only(right: 8),
                 child: ChoiceChip(
                   label: Text(
-                    '${d.weekday} $dayNum',
+                    chipText,
                     style: const TextStyle(fontSize: 13),
                   ),
                   selected: selected,

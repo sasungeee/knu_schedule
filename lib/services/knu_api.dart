@@ -358,13 +358,7 @@ class KnuApi {
       );
     }
 
-    final days = _parseScheduleHtml(html);
-    days.sort((a, b) {
-      final da = _parseDdMmYyyy(a.date);
-      final db = _parseDdMmYyyy(b.date);
-      if (da == null || db == null) return a.date.compareTo(b.date);
-      return da.compareTo(db);
-    });
+    final days = _sortDays(_parseScheduleHtml(html));
 
     return ScheduleResult(
       group: group,
@@ -410,7 +404,6 @@ class KnuApi {
   List<DaySchedule> _parseScheduleHtml(String html) {
     final doc = html_parser.parse(html);
     final byDate = <String, List<Lesson>>{};
-    final dateOrder = <String>[];
 
     // 1) Картки / клітинки з data-атрибутами (основний шлях).
     final cards = doc.querySelectorAll(
@@ -421,11 +414,7 @@ class KnuApi {
     for (final el in cards) {
       final lesson = _lessonFromDataAttrs(el);
       if (lesson == null) continue;
-      byDate.putIfAbsent(lesson.date, () {
-        dateOrder.add(lesson.date);
-        return [];
-      });
-      // Уникаємо дублікатів (одна і та ж пара може потрапити з батька+дитини).
+      byDate.putIfAbsent(lesson.date, () => []);
       final list = byDate[lesson.date]!;
       final dup = list.any(
         (l) =>
@@ -439,7 +428,7 @@ class KnuApi {
     // 2) Fallback: стара таблиця #timeTable (якщо раптом повернуть).
     if (byDate.isEmpty) {
       final legacy = _parseLegacyTimeTable(doc);
-      if (legacy.isNotEmpty) return legacy;
+      if (legacy.isNotEmpty) return _sortDays(legacy);
     }
 
     // 3) Fallback: list-view рядки.
@@ -449,71 +438,231 @@ class KnuApi {
       )) {
         final lesson = _lessonFromDataAttrs(row) ?? _lessonFromTextBlock(row);
         if (lesson == null) continue;
-        byDate.putIfAbsent(lesson.date, () {
-          dateOrder.add(lesson.date);
-          return [];
-        });
+        byDate.putIfAbsent(lesson.date, () => []);
         byDate[lesson.date]!.add(lesson);
       }
     }
 
     final result = <DaySchedule>[];
-    final seen = <String>{};
-    for (final d in dateOrder) {
-      if (!seen.add(d)) continue;
-      final lessons = List<Lesson>.from(byDate[d] ?? const []);
-      lessons.sort((a, b) => a.pairNumber.compareTo(b.pairNumber));
+    for (final entry in byDate.entries) {
+      final lessons = List<Lesson>.from(entry.value)
+        ..sort((a, b) => a.pairNumber.compareTo(b.pairNumber));
       result.add(DaySchedule(
-        date: d,
-        weekday: _weekdayFromDate(d),
+        date: entry.key,
+        weekday: _weekdayFromDate(entry.key),
         lessons: lessons,
       ));
     }
-    return result;
+    return _sortDays(result);
+  }
+
+  /// Завжди сортуємо дні за реальною датою (не рядком).
+  List<DaySchedule> _sortDays(List<DaySchedule> days) {
+    days.sort((a, b) {
+      final da = _parseAnyDate(a.date);
+      final db = _parseAnyDate(b.date);
+      if (da != null && db != null) return da.compareTo(db);
+      if (da != null) return -1;
+      if (db != null) return 1;
+      return a.date.compareTo(b.date);
+    });
+    return days;
+  }
+
+  /// Нормалізує будь-який формат дати → dd.MM.yyyy.
+  String _normalizeDate(String raw) {
+    final dt = _parseAnyDate(raw);
+    if (dt == null) {
+      final m = RegExp(r'(\d{2})\.(\d{2})\.(\d{4})').firstMatch(raw);
+      if (m != null) return '${m.group(1)}.${m.group(2)}.${m.group(3)}';
+      return raw.trim();
+    }
+    return '${dt.day.toString().padLeft(2, '0')}.'
+        '${dt.month.toString().padLeft(2, '0')}.'
+        '${dt.year}';
+  }
+
+  DateTime? _parseAnyDate(String raw) {
+    final s = raw.trim();
+    if (s.isEmpty) return null;
+
+    // dd.MM.yyyy або d.M.yyyy
+    final dmy = RegExp(r'(\d{1,2})\.(\d{1,2})\.(\d{4})').firstMatch(s);
+    if (dmy != null) {
+      try {
+        return DateTime(
+          int.parse(dmy.group(3)!),
+          int.parse(dmy.group(2)!),
+          int.parse(dmy.group(1)!),
+        );
+      } catch (_) {}
+    }
+
+    // yyyy-MM-dd (ISO)
+    final iso = RegExp(r'(\d{4})-(\d{2})-(\d{2})').firstMatch(s);
+    if (iso != null) {
+      try {
+        return DateTime(
+          int.parse(iso.group(1)!),
+          int.parse(iso.group(2)!),
+          int.parse(iso.group(3)!),
+        );
+      } catch (_) {}
+    }
+
+    // «13 жовтня», «10 листопада 2026», «2 листопада»
+    final uk = RegExp(
+      r'(\d{1,2})\s*([а-яіїєґА-ЯІЇЄҐ]+)\s*(\d{4})?',
+      unicode: true,
+    ).firstMatch(s);
+    if (uk != null) {
+      final day = int.tryParse(uk.group(1)!);
+      final monthWord = uk.group(2)!.toLowerCase();
+      final yearStr = uk.group(3);
+      int? month;
+      // «листопада» перед «липня»!
+      if (monthWord.startsWith('лист')) {
+        month = 11;
+      } else if (monthWord.startsWith('лип')) {
+        month = 7;
+      } else if (monthWord.startsWith('січ')) {
+        month = 1;
+      } else if (monthWord.startsWith('лют')) {
+        month = 2;
+      } else if (monthWord.startsWith('бер')) {
+        month = 3;
+      } else if (monthWord.startsWith('квіт')) {
+        month = 4;
+      } else if (monthWord.startsWith('трав')) {
+        month = 5;
+      } else if (monthWord.startsWith('черв')) {
+        month = 6;
+      } else if (monthWord.startsWith('серп')) {
+        month = 8;
+      } else if (monthWord.startsWith('вер')) {
+        month = 9;
+      } else if (monthWord.startsWith('жовт')) {
+        month = 10;
+      } else if (monthWord.startsWith('груд')) {
+        month = 12;
+      }
+      if (day != null && month != null) {
+        final year = yearStr != null ? int.parse(yearStr) : DateTime.now().year;
+        try {
+          var dt = DateTime(year, month, day);
+          if (yearStr == null) {
+            final now = DateTime.now();
+            if (dt.difference(now).inDays > 180) {
+              dt = DateTime(year - 1, month, day);
+            } else if (now.difference(dt).inDays > 180) {
+              dt = DateTime(year + 1, month, day);
+            }
+          }
+          return dt;
+        } catch (_) {}
+      }
+    }
+
+    return DateTime.tryParse(s);
   }
 
   Lesson? _lessonFromDataAttrs(Element el) {
-    final discipline = (el.attributes['data-discipline'] ??
-            el.attributes['data-subject'] ??
-            '')
-        .trim();
-    final date = (el.attributes['data-date'] ?? '').trim();
-    if (discipline.isEmpty && date.isEmpty) {
-      // Можливо атрибути на нащадку.
+    // Атрибути можуть бути на самому елементі або на нащадку/предку.
+    String attr(String name) {
+      final v = el.attributes[name];
+      if (v != null && v.trim().isNotEmpty) return v.trim();
+      final child = el.querySelector('[$name]');
+      if (child != null) {
+        final cv = child.attributes[name];
+        if (cv != null && cv.trim().isNotEmpty) return cv.trim();
+      }
+      // Піднятись до 3 рівнів вгору (картка часто обгортка).
+      Element? p = el.parent;
+      for (var i = 0; i < 3 && p != null; i++) {
+        final pv = p.attributes[name];
+        if (pv != null && pv.trim().isNotEmpty) return pv.trim();
+        p = p.parent;
+      }
+      return '';
+    }
+
+    final discipline = attr('data-discipline').isNotEmpty
+        ? attr('data-discipline')
+        : attr('data-subject');
+    final rawDate = attr('data-date');
+    if (discipline.isEmpty && rawDate.isEmpty) {
       final child = el.querySelector('[data-discipline], [data-date]');
       if (child != null && child != el) return _lessonFromDataAttrs(child);
       return null;
     }
-    if (date.isEmpty) return null;
+    if (rawDate.isEmpty) return null;
 
-    final pairRaw = el.attributes['data-pair-number'] ??
-        el.attributes['data-pair'] ??
-        el.attributes['data-number'] ??
-        '';
-    final pairNumber = int.tryParse(pairRaw) ?? 0;
-    final timeStart = (el.attributes['data-start'] ?? '').trim();
-    final timeEnd = (el.attributes['data-end'] ?? '').trim();
-    final lessonType = (el.attributes['data-type'] ?? '').trim();
-    final classroom = (el.attributes['data-classroom'] ??
-            el.attributes['data-room'] ??
-            '')
-        .trim();
-    final teacher = (el.attributes['data-teacher'] ?? '').trim();
-    final topic = (el.attributes['data-topic'] ?? '').trim();
+    final date = _normalizeDate(rawDate);
+    final pairNumber = int.tryParse(attr('data-pair-number').isNotEmpty
+            ? attr('data-pair-number')
+            : (attr('data-pair').isNotEmpty
+                ? attr('data-pair')
+                : attr('data-number'))) ??
+        0;
+    final timeStart = attr('data-start');
+    final timeEnd = attr('data-end');
+    final lessonType = attr('data-type');
+    final classroom = (attr('data-classroom').isNotEmpty
+            ? attr('data-classroom')
+            : attr('data-room'))
+        .replaceFirst(RegExp(r'^ауд\.?\s*', caseSensitive: false), '');
+    final teacher = attr('data-teacher');
+    final topic = attr('data-topic');
 
     String subjectFull = discipline;
     if (topic.isNotEmpty) subjectFull = '$discipline. $topic';
 
-    // Короткий текст з видимого вмісту картки.
-    final shortText = el.text
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
+    final shortText = el.text.replaceAll(RegExp(r'\s+'), ' ').trim();
     final subjectShort = shortText.isNotEmpty
         ? shortText.split(RegExp(r'\[')).first.trim()
         : discipline;
 
-    final adsRaw = el.attributes['data-announcement'] ?? '';
-    final hasAds = adsRaw.trim().isNotEmpty;
+    // Оголошення: data-announcement, data-ads, або кнопка з megaphone.
+    String adsRaw = attr('data-announcement');
+    if (adsRaw.isEmpty) adsRaw = attr('data-ads');
+    if (adsRaw.isEmpty) {
+      final adsBtn = el.querySelector(
+        '[data-announcement], [data-ads], .btn-show-ads, '
+        '[data-bs-target="#announcementTextModal"], .bi-megaphone, '
+        'a[href*="show-ads"]',
+      );
+      if (adsBtn != null) {
+        adsRaw = adsBtn.attributes['data-announcement'] ??
+            adsBtn.attributes['data-ads'] ??
+            adsBtn.attributes['data-content'] ??
+            '';
+        // Старі коди r1/r2
+        final r1 = int.tryParse(adsBtn.attributes['data-r1'] ?? '');
+        final r2 = adsBtn.attributes['data-r2'];
+        if (adsRaw.isEmpty && r1 != null) {
+          return Lesson(
+            pairNumber: pairNumber,
+            timeStart: timeStart,
+            timeEnd: timeEnd,
+            date: date,
+            subjectShort: subjectShort.isEmpty ? discipline : subjectShort,
+            subjectFull: subjectFull.isEmpty ? subjectShort : subjectFull,
+            lessonType: lessonType,
+            classroom: classroom,
+            teacher: teacher,
+            teacherFull: teacher,
+            adsR1: r1,
+            adsDate: r2,
+          );
+        }
+      }
+    }
+    // Якщо є іконка megaphone без тексту — все одно показуємо кнопку.
+    final hasMegaphone = el.querySelector(
+          '.bi-megaphone, .bi-megaphone-fill, .fa-bullhorn, .btn-show-ads',
+        ) !=
+        null;
+    final hasAds = adsRaw.trim().isNotEmpty || hasMegaphone;
 
     return Lesson(
       pairNumber: pairNumber,
@@ -523,15 +672,13 @@ class KnuApi {
       subjectShort: subjectShort.isEmpty ? discipline : subjectShort,
       subjectFull: subjectFull.isEmpty ? subjectShort : subjectFull,
       lessonType: lessonType,
-      classroom: classroom.replaceFirst(
-        RegExp(r'^ауд\.?\s*', caseSensitive: false),
-        '',
-      ),
+      classroom: classroom,
       teacher: teacher,
       teacherFull: teacher,
-      // Зберігаємо оголошення в adsDate як текст (якщо r1 немає).
-      adsR1: hasAds ? 1 : null,
-      adsDate: hasAds ? adsRaw : null,
+      adsR1: hasAds ? (adsRaw.trim().isNotEmpty ? 1 : 1) : null,
+      adsDate: adsRaw.trim().isNotEmpty
+          ? adsRaw
+          : (hasMegaphone ? ' ' : null), // пробіл = є кнопка, текст підвантажимо
     );
   }
 
@@ -583,10 +730,11 @@ class KnuApi {
       }
       if (startDt == null) continue;
 
-      final date =
-          '${startDt.day.toString().padLeft(2, '0')}.'
-          '${startDt.month.toString().padLeft(2, '0')}.'
-          '${startDt.year}';
+      final date = _normalizeDate(
+        '${startDt.day.toString().padLeft(2, '0')}.'
+        '${startDt.month.toString().padLeft(2, '0')}.'
+        '${startDt.year}',
+      );
       final timeStart =
           '${startDt.hour.toString().padLeft(2, '0')}:${startDt.minute.toString().padLeft(2, '0')}';
 
@@ -775,33 +923,28 @@ class KnuApi {
     return result;
   }
 
-  DateTime? _parseDdMmYyyy(String ddmmyyyy) {
-    try {
-      final p = ddmmyyyy.split('.');
-      if (p.length != 3) return null;
-      return DateTime(int.parse(p[2]), int.parse(p[1]), int.parse(p[0]));
-    } catch (_) {
-      return null;
-    }
-  }
+  DateTime? _parseDdMmYyyy(String ddmmyyyy) => _parseAnyDate(ddmmyyyy);
 
   String _weekdayFromDate(String ddmmyyyy) {
-    try {
-      final p = ddmmyyyy.split('.');
-      final dt = DateTime(int.parse(p[2]), int.parse(p[1]), int.parse(p[0]));
-      const names = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'];
-      return names[dt.weekday - 1];
-    } catch (_) {
-      return '';
-    }
+    final dt = _parseAnyDate(ddmmyyyy);
+    if (dt == null) return '';
+    const names = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'];
+    return names[dt.weekday - 1];
   }
 
+  /// HTML → текст без дублювання URL (якщо текст посилання == href — один раз).
   String _stripHtml(String html) {
     final doc = html_parser.parse(html);
     for (final a in doc.querySelectorAll('a[href]')) {
-      final href = a.attributes['href'] ?? '';
+      final href = (a.attributes['href'] ?? '').trim();
       final t = a.text.trim();
-      a.replaceWith(Text(t.isEmpty ? href : '$t\n$href'));
+      if (t.isEmpty) {
+        a.replaceWith(Text(href));
+      } else if (t == href || href.contains(t) || t.contains(href)) {
+        a.replaceWith(Text(t));
+      } else {
+        a.replaceWith(Text('$t ($href)'));
+      }
     }
     final text = doc.body?.text ?? doc.documentElement?.text ?? html;
     return text.replaceAll(RegExp(r'\n{3,}'), '\n\n').trim();
