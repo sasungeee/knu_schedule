@@ -636,15 +636,33 @@ class _ScheduleScreenState extends State<ScheduleScreen>
 
       // На desktop (Linux/Windows/macOS) saveFile лише повертає шлях —
       // bytes треба записати самим. На Android/iOS bytes пише плагін.
-      final Uri? uri = await FilePicker.saveFile(
-        dialogTitle: 'Зберегти розклад',
-        fileName: fileName.endsWith('.pdf')
-            ? fileName
-            : '$fileName.pdf',
-        type: FileType.custom,
-        allowedExtensions: const ['pdf'],
-        bytes: bytes,
-      );
+
+      final saveFileName = fileName.endsWith('.pdf')
+          ? fileName
+          : '$fileName.pdf';
+
+      Uri? uri;
+
+      if (Platform.isAndroid) {
+        final String? savedUri = await const MethodChannel(
+          'ua.knu.knu_schedule/save_pdf',
+        ).invokeMethod<String>('savePdf', {
+          'fileName': saveFileName,
+          'bytes': bytes,
+        });
+
+        if (savedUri != null) {
+          uri = Uri.parse(savedUri);
+        }
+      } else {
+        uri = await FilePicker.saveFile(
+          dialogTitle: 'Зберегти розклад',
+          fileName: saveFileName,
+          type: FileType.custom,
+          allowedExtensions: const ['pdf'],
+          bytes: bytes,
+        );
+      }
 
       if (!mounted) return;
 
@@ -659,10 +677,6 @@ class _ScheduleScreenState extends State<ScheduleScreen>
         SnackBar(content: Text('Збережено:\n$uri')),
       );
 
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Збережено:\n$uri')),
-      );
     } catch (e) {
       if (!mounted) return;
       // Закрити прогрес, якщо ще відкритий.
