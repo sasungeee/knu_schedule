@@ -1,8 +1,7 @@
 # Розклад КНУ (Flutter)
 
-Нативне Android-застосування для перегляду розкладу занять
-[Криворізького національного університету](https://asu.knu.edu.ua/time-table/group)
-без WebView.
+Нативне, не офіційне Android-застосування для перегляду розкладу занять
+[Криворізького національного університету](https://asu.knu.edu.ua/time-table/group).
 
 <table align="center">
   <tr>
@@ -24,7 +23,8 @@
 - Можна закріпити кілька груп (факультет / курс / група) — без повторного вибору
 - Основна група + швидке перемикання
 - Розклад **по днях** і **списком**
-- Перегляд оголошень до пар
+- Завантаження розкладу у PDF
+- Перегляд анонсів до пар
 - Темна / світла тема (системна)
 - Працює з Android 8+ (у т.ч. сучасні версії, де офіційний APK МКР «застарілий»)
 
@@ -62,12 +62,14 @@ APK: `build/app/outputs/flutter-apk/app-release.apk`.
 ```
 lib/
   main.dart
-  models/models.dart
-  services/knu_api.dart    # мережа + парсер + логін
-  services/storage.dart    # SharedPreferences (групи + облікові дані)
+  models/
+    models.dart
+  services/
+    knu_api.dart
+    storage.dart
   screens/
     home_screen.dart
-    login_screen.dart      # екран входу
+    login_screen.dart
     picker_screen.dart
     schedule_screen.dart
 ```
