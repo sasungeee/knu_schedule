@@ -8,14 +8,12 @@ import '../models/models.dart';
 
 /// Клієнт до asu.knu.edu.ua (система МКР v3).
 ///
-/// З осені 2026 інтерфейс повністю перероблений:
-///   POST /time-table/get-faculties  {id: structureId}
-///   POST /time-table/get-courses    {id: facultyId}
-///   POST /time-table/get-groups     {id: courseId, facultyId: facultyId}
-///   POST /time-table/get-schedule   {type: "group", id: groupId}
+/// Реальний інтерфейс (форма POST, без окремих JSON get-*):
+///   GET  /time-table/group — CSRF + selects факультетів
+///   POST /time-table/group?type=0 — TimeTableForm[facultyId/course/groupId] + дати
+///   Відповідь — HTML (форма + таблиця #timeTable)
+///   GET  /time-table/show-ads?r1=&r2= — оголошення
 ///
-/// Відповіді select-ів — JSON-масив [{id, text}, ...].
-/// Розклад — JSON {html: "..."} або {events: [...], startDate: "..."}.
 class KnuApi {
   static const baseUrl = 'https://asu.knu.edu.ua';
   static const userAgent =
@@ -208,12 +206,9 @@ class KnuApi {
     throw KnuAuthException('Потрібен вхід до asu.knu.edu.ua');
   }
 
-  /// POST x-www-form-urlencoded, повертає body (з авто-релогіном при 401/login-page).
-  Future<http.Response> _postAjax(
-    String path,
-    Map<String, String> fields, {
-    bool expectJson = true,
-  }) async {
+  /// POST форми /time-table/group?type=0 (сайт не має окремих get-* JSON-ендпоінтів).
+  /// Повертає HTML відповіді (оновлена форма + таблиця).
+  Future<String> _postGroupForm(Map<String, String> fields) async {
     await _ensureSession();
 
     Future<http.Response> doPost() {
@@ -222,15 +217,21 @@ class KnuApi {
         ...fields,
       };
       return _client.post(
-        Uri.parse('$baseUrl$path'),
-        headers: _ajaxHeaders,
+        Uri.parse('$baseUrl/time-table/group?type=0'),
+        headers: {
+          ..._headers,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Requested-With': 'XMLHttpRequest',
+          'Accept': 'text/html, */*; q=0.01',
+          'Referer': '$baseUrl/time-table/group',
+          'Origin': baseUrl,
+        },
         body: body,
       );
     }
 
     var res = await doPost();
     _storeCookies(res);
-    // Інколи CSRF оновлюється в HTML-відповіді (рідко для JSON).
     if (res.body.contains('csrf-token') || res.body.contains('_csrf-frontend')) {
       _extractCsrf(res.body);
     }
@@ -241,6 +242,9 @@ class KnuApi {
         await login(_username!, _password!);
         res = await doPost();
         _storeCookies(res);
+        if (res.body.contains('csrf-token') || res.body.contains('_csrf-frontend')) {
+          _extractCsrf(res.body);
+        }
         if (_isLoginPage(res.body) || res.statusCode >= 400) {
           throw KnuAuthException('Сесія закінчилась. Увійдіть знову.');
         }
@@ -250,50 +254,60 @@ class KnuApi {
     }
 
     if (res.statusCode >= 400) {
-      throw KnuApiException('HTTP ${res.statusCode} на $path');
+      throw KnuApiException('HTTP ${res.statusCode} на /time-table/group');
     }
-    return res;
+    return res.body;
   }
 
-  Future<List<MapEntry<int, String>>> _fetchSelectOptions(
-    String path,
-    Map<String, String> fields,
-  ) async {
-    final res = await _postAjax(path, fields);
-    final decoded = jsonDecode(res.body);
-    if (decoded is! List) {
-      throw KnuApiException('Неочікувана відповідь $path (очікувався масив)');
-    }
+  List<MapEntry<int, String>> _parseSelectOptions(String html, String selectId) {
+    final doc = html_parser.parse(html);
+    final select = doc.querySelector('#$selectId') ??
+        doc.querySelector('select[name*="${selectId.replaceAll('timetableform-', '')}"]');
+    if (select == null) return [];
+
     final result = <MapEntry<int, String>>[];
-    for (final item in decoded) {
-      if (item is! Map) continue;
-      final idRaw = item['id'];
-      final text = (item['text'] ?? item['name'] ?? '').toString().trim();
-      if (text.isEmpty) continue;
-      final id = idRaw is int
-          ? idRaw
-          : int.tryParse(idRaw?.toString() ?? '');
+    for (final opt in select.querySelectorAll('option')) {
+      final val = (opt.attributes['value'] ?? '').trim();
+      final text = opt.text.trim();
+      if (val.isEmpty || text.isEmpty || text.startsWith('--')) continue;
+      final id = int.tryParse(val);
       if (id == null) continue;
       result.add(MapEntry(id, text));
     }
     return result;
   }
 
-  /// Список факультетів (structureId за замовчуванням = 0).
+  /// Список факультетів — з GET /time-table/group (після логіну).
   Future<List<Faculty>> getFaculties({int structureId = defaultStructureId}) async {
-    final opts = await _fetchSelectOptions(
-      '/time-table/get-faculties',
-      {'id': '$structureId'},
+    await _ensureSession();
+    final res = await _client.get(
+      Uri.parse('$baseUrl/time-table/group'),
+      headers: _headers,
     );
+    _storeCookies(res);
+    _extractCsrf(res.body);
+    if (_isLoginPage(res.body)) {
+      throw KnuAuthException('Сесія закінчилась. Увійдіть знову.');
+    }
+    final opts = _parseSelectOptions(res.body, 'timetableform-facultyid');
+    if (opts.isEmpty) {
+      // fallback: POST порожньої форми
+      final html = await _postGroupForm({});
+      return _parseSelectOptions(html, 'timetableform-facultyid')
+          .map((e) => Faculty(id: e.key, name: e.value))
+          .toList();
+    }
     return opts.map((e) => Faculty(id: e.key, name: e.value)).toList();
   }
 
-  /// Список курсів для факультету.
+  /// Список курсів для факультету (POST форми з facultyId → оновлений select курсу).
   Future<List<int>> getCourses(int facultyId) async {
-    final opts = await _fetchSelectOptions(
-      '/time-table/get-courses',
-      {'id': '$facultyId'},
-    );
+    final html = await _postGroupForm({
+      'TimeTableForm[facultyId]': '$facultyId',
+      'TimeTableForm[course]': '',
+      'TimeTableForm[groupId]': '',
+    });
+    final opts = _parseSelectOptions(html, 'timetableform-course');
     return opts.map((e) => e.key).toList();
   }
 
@@ -303,13 +317,12 @@ class KnuApi {
     required String facultyName,
     required int course,
   }) async {
-    final opts = await _fetchSelectOptions(
-      '/time-table/get-groups',
-      {
-        'id': '$course',
-        'facultyId': '$facultyId',
-      },
-    );
+    final html = await _postGroupForm({
+      'TimeTableForm[facultyId]': '$facultyId',
+      'TimeTableForm[course]': '$course',
+      'TimeTableForm[groupId]': '',
+    });
+    final opts = _parseSelectOptions(html, 'timetableform-groupid');
     return opts
         .map(
           (e) => Group(
@@ -323,41 +336,30 @@ class KnuApi {
         .toList();
   }
 
-  /// Завантажити розклад групи.
+  /// Діапазон дат за замовчуванням: ~4 тижні від сьогодні.
+  Map<String, String> _defaultDateRange() {
+    final now = DateTime.now();
+    final start = now.subtract(Duration(days: now.weekday - 1)); // пн
+    final end = start.add(const Duration(days: 27));
+    String fmt(DateTime d) =>
+        '${d.day.toString().padLeft(2, '0')}.${d.month.toString().padLeft(2, '0')}.${d.year}';
+    return {
+      'TimeTableForm[dateStart]': fmt(start),
+      'TimeTableForm[dateEnd]': fmt(end),
+      'TimeTableForm[indicationDays]': '5',
+    };
+  }
+
+  /// Завантажити розклад групи через POST /time-table/group?type=0.
   Future<ScheduleResult> getSchedule(Group group) async {
-    final res = await _postAjax(
-      '/time-table/get-schedule',
-      {
-        'type': 'group',
-        'id': '${group.id}',
-      },
-    );
+    final fields = <String, String>{
+      'TimeTableForm[facultyId]': '${group.facultyId}',
+      'TimeTableForm[course]': '${group.course}',
+      'TimeTableForm[groupId]': '${group.id}',
+      ..._defaultDateRange(),
+    };
 
-    final decoded = jsonDecode(res.body);
-    String html = '';
-    if (decoded is Map) {
-      html = (decoded['html'] as String?) ?? '';
-      // Calendar-view fallback: якщо є events — парсимо їх.
-      if (html.isEmpty && decoded['events'] is List) {
-        final days = _parseEventsJson(decoded['events'] as List);
-        return ScheduleResult(
-          group: group,
-          days: days,
-          loadedAt: DateTime.now(),
-        );
-      }
-    } else if (decoded is String) {
-      html = decoded;
-    }
-
-    if (html.isEmpty) {
-      return ScheduleResult(
-        group: group,
-        days: const [],
-        loadedAt: DateTime.now(),
-      );
-    }
-
+    final html = await _postGroupForm(fields);
     final days = _sortDays(_parseScheduleHtml(html));
 
     return ScheduleResult(
@@ -367,7 +369,7 @@ class KnuApi {
     );
   }
 
-  /// Оголошення до пари (стара точка, якщо ще жива).
+  /// Оголошення до пари.
   Future<String> getAds({required int r1, required String r2}) async {
     await _ensureSession();
     final uri = Uri.parse('$baseUrl/time-table/show-ads').replace(
@@ -397,15 +399,19 @@ class KnuApi {
   // Парсери
   // ---------------------------------------------------------------------------
 
-  /// Парсинг HTML-таблиці / карток розкладу (нова розмітка МКР 3.x).
+  /// Парсинг HTML-таблиці / карток розкладу.
   ///
-  /// Шукаємо будь-які елементи з data-discipline / data-date / data-pair-number
-  /// (саме їх JS підставляє в модалку деталей пари).
+  /// Основний шлях — legacy-таблиця #timeTable (поточна розмітка МКР на asu.knu.edu.ua).
+  /// Додатково — data-атрибути / list-view, якщо з’являться.
   List<DaySchedule> _parseScheduleHtml(String html) {
     final doc = html_parser.parse(html);
     final byDate = <String, List<Lesson>>{};
 
-    // 1) Картки / клітинки з data-атрибутами (основний шлях).
+    // 1) Legacy таблиця #timeTable (актуальна розмітка 2026).
+    final legacy = _parseLegacyTimeTable(doc);
+    if (legacy.isNotEmpty) return _sortDays(legacy);
+
+    // 2) Картки / клітинки з data-атрибутами.
     final cards = doc.querySelectorAll(
       '[data-discipline], [data-pair-number], .schedule-table-td, '
       '.fc-lesson-card, .schedule-card-stacked, [data-bs-toggle="modal"]',
@@ -425,12 +431,6 @@ class KnuApi {
       if (!dup) list.add(lesson);
     }
 
-    // 2) Fallback: стара таблиця #timeTable (якщо раптом повернуть).
-    if (byDate.isEmpty) {
-      final legacy = _parseLegacyTimeTable(doc);
-      if (legacy.isNotEmpty) return _sortDays(legacy);
-    }
-
     // 3) Fallback: list-view рядки.
     if (byDate.isEmpty) {
       for (final row in doc.querySelectorAll(
@@ -443,7 +443,6 @@ class KnuApi {
       }
     }
 
-    // Глобальний прохід: кнопки анонсів, що могли лишитись поза карткою.
     _attachOrphanAnnouncements(doc, byDate);
 
     final result = <DaySchedule>[];
@@ -458,8 +457,6 @@ class KnuApi {
     }
     return _sortDays(result);
   }
-
-  /// Якщо кнопка анонсу стоїть поруч з парою — прив'язуємо текст до Lesson.
   void _attachOrphanAnnouncements(
     Document doc,
     Map<String, List<Lesson>> byDate,
